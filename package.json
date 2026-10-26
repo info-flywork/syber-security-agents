@@ -1,0 +1,36 @@
+{
+  "name": "site-gozcu",
+  "private": true,
+  "type": "module",
+  "description": "Şirket web sitelerini dışarıdan izleyen güvenlik paneli (Node.js + PostgreSQL)",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "esbuild src/server.ts src/cli.ts --bundle --platform=node --target=node22 --format=esm --packages=external --outdir=dist",
+    "start": "node dist/server.js",
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "cli": "tsx --env-file=.env src/cli.ts",
+    "db:dev": "docker compose -f docker-compose.dev.yml up -d",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "node-cron": "4.6.0",
+    "pg": "8.23.1",
+    "qrcode": "1.5.4",
+    "undici": "8.12.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "@types/pg": "8.23.1",
+    "@types/qrcode": "1.5.6",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

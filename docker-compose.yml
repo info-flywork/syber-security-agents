@@ -1,0 +1,43 @@
+# Site Gözcü — sunucu (n8n'in kullandığı Traefik arkasında, Let's Encrypt SSL).
+# Değerler bu klasördeki .env dosyasından gelir (örnek: .env.example). Port dışarı açılmaz; trafik sadece Traefik'ten gelir.
+services:
+  app:
+    build: .
+    image: site-gozcu:latest
+    container_name: site-gozcu
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "3000"
+      TRUST_PROXY: "1"
+    # Sunucudaki PostgreSQL'e erişim: host.docker.internal → Docker köprüsünün ağ geçidi (ör. 172.17.0.1)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - traefik
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.sitegozcu.rule=Host(`${DOMAIN}`)
+      - traefik.http.routers.sitegozcu.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.sitegozcu.tls=true
+      - traefik.http.routers.sitegozcu.tls.certresolver=${CERT_RESOLVER}
+      - traefik.http.services.sitegozcu.loadbalancer.server.port=3000
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK}

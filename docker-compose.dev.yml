@@ -1,0 +1,21 @@
+# Sadece yerel geliştirme: geçici PostgreSQL (sunucuda kullanılmaz; orada mevcut PostgreSQL kullanılır).
+# Bilgisayardaki başka bir PostgreSQL ile çakışmasın diye 55432 portunda, sadece 127.0.0.1'de.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: site-gozcu-dev-db
+    environment:
+      POSTGRES_DB: sitegozcu
+      POSTGRES_USER: sitegozcu
+      POSTGRES_PASSWORD: ${DEV_DB_PASSWORD:-yerel-gelistirme}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - devdb:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sitegozcu -d sitegozcu"]
+      interval: 2s
+      retries: 30
+
+volumes:
+  devdb:
