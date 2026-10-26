@@ -111,6 +111,50 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX audit_log_org_at ON audit_log(org_id, at DESC);
   `,
+  // 2 — varlık API anahtarları ve uygulamalardan gelen olaylar
+  `
+  CREATE TABLE site_keys (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    site_uuid uuid NOT NULL REFERENCES sites(uuid) ON DELETE CASCADE,
+    mode text NOT NULL CHECK (mode IN ('live', 'test')),
+    public_id text NOT NULL UNIQUE,
+    signing_key_enc text,           -- secret'tan türetilen imza anahtarı, APP_SECRET ile şifreli; secret'ın kendisi saklanmaz
+    secret_hint text NOT NULL,      -- secret'ın son 4 karakteri (hangi anahtar olduğunu tanımak için)
+    created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    rotated_at timestamptz,
+    revoked_at timestamptz,
+    last_used_at timestamptz
+  );
+  -- Varlık başına mod başına tek etkin anahtar
+  CREATE UNIQUE INDEX site_keys_active ON site_keys(site_uuid, mode) WHERE revoked_at IS NULL;
+
+  -- Tekrar oynatma koruması: aynı nonce zaman penceresi içinde ikinci kez kabul edilmez
+  CREATE TABLE ingest_nonces (
+    key_id uuid NOT NULL REFERENCES site_keys(id) ON DELETE CASCADE,
+    nonce text NOT NULL,
+    at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (key_id, nonce)
+  );
+  CREATE INDEX ingest_nonces_at ON ingest_nonces(at);
+
+  CREATE TABLE app_events (
+    id bigserial PRIMARY KEY,
+    site_uuid uuid NOT NULL REFERENCES sites(uuid) ON DELETE CASCADE,
+    key_id uuid REFERENCES site_keys(id) ON DELETE SET NULL,
+    mode text NOT NULL CHECK (mode IN ('live', 'test')),
+    type text NOT NULL,
+    severity text NOT NULL CHECK (severity IN ('critical', 'high', 'info')),
+    message text,
+    ip text,
+    path text,
+    actor text,
+    meta jsonb,
+    occurred_at timestamptz NOT NULL,
+    received_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX app_events_site_time ON app_events(site_uuid, occurred_at DESC);
+  `,
 ];
 
 export async function migrate(db: Db): Promise<void> {

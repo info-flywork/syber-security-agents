@@ -2,6 +2,8 @@
  * HTTP yönlendirici (fetch tarzı: Request → Response). Node sunucusu server.ts'te.
  * Her panel isteği oturumdaki organizasyonla sınırlanır; yetki kuralları accounts.ts'teki `can`.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import QRCode from "qrcode";
 import { esc } from "./alert";
 import {
@@ -33,6 +35,8 @@ import {
   type Role,
   type User,
 } from "./accounts";
+import { createKey, listActiveKeys, revokeKey, rotateKey, type KeyMode } from "./apikeys";
+import { appSummaries } from "./app-events";
 import { audit, listAudit, type AuditEntry } from "./audit";
 import {
   RateLimiter,
@@ -71,13 +75,25 @@ import { parseSiteInput, type SiteInput } from "./site-input";
 import { addSite, getSite, listSites, removeSite, updateSite, type SiteRow } from "./sites";
 import { dashboard, layout, loginPage, siteDetail, siteHealth, type PanelCtx } from "./ui";
 import { accountPage, auditPage, invitePage, recoveryCodesPage, teamPage, totpPage, totpSetupPage } from "./ui-account";
+import { connectionSection, revealBox, type Revealed } from "./ui-connect";
+import { INGEST_PATH, createIngest } from "./ingest";
 
 export interface AppDeps {
   cfg: Config;
   db: Db;
   monitor: MonitorDeps;
   mailer: Mailer | null;
+  /** PHP / Node istemci dosyalarının klasörü (varsayılan: ./clients) */
+  clientsDir?: string;
+  /** Testlerde olay API'sinin istek sınırlarını küçültmek için */
+  ingestLimits?: { perIp?: number; perKey?: number };
 }
+
+/** İndirilebilir istemciler: yol → [klasördeki dosya, içerik türü] */
+const CLIENT_FILES: Record<string, [string, string]> = {
+  "/istemci/sitegozcu.php": ["php/sitegozcu.php", "text/plain; charset=utf-8"],
+  "/istemci/sitegozcu.mjs": ["node/sitegozcu.mjs", "text/plain; charset=utf-8"],
+};
 
 export interface RequestMeta {
   ip: string | null;
@@ -123,6 +139,8 @@ export function createApp(deps: AppDeps): Handler {
   const totpLimit = new RateLimiter(10, 15 * 60_000); // oturum başına
   const inviteLimit = new RateLimiter(30, 60 * 60_000); // organizasyon başına
   const registerLimit = new RateLimiter(10, 60 * 60_000); // IP başına
+  const ingest = createIngest({ db, appSecret: cfg.appSecret, limits: deps.ingestLimits });
+  const clientsDir = deps.clientsDir ?? join(process.cwd(), "clients");
 
   const headers = (extra: Record<string, string> = {}) => ({
     "content-security-policy": CSP,
@@ -154,6 +172,19 @@ export function createApp(deps: AppDeps): Handler {
     if (path === "/healthz") {
       await db.query("SELECT 1");
       return new Response("ok", { headers: { "content-type": "text/plain", "cache-control": "no-store" } });
+    }
+    // Uygulamalardan imzalı olay alma: oturum ve CSRF kontrolü yerine HMAC imzası
+    if (path === INGEST_PATH) return ingest(req, ip);
+    // İstemci dosyaları herkese açık (gizli bilgi içermez)
+    const client = CLIENT_FILES[path];
+    if (client && req.method === "GET") {
+      try {
+        return new Response(readFileSync(join(clientsDir, client[0])), {
+          headers: headers({ "content-type": client[1], "content-disposition": `attachment; filename="${path.split("/").pop()}"`, "cache-control": "public, max-age=300" }),
+        });
+      } catch {
+        return errorPage(404, "İstemci dosyası bulunamadı.");
+      }
     }
     if (req.method !== "GET" && req.method !== "POST") return errorPage(405, "Desteklenmeyen istek.");
     if (isPost && !sameOrigin(req, publicOrigin)) return errorPage(403, "Geçersiz istek kaynağı.");
@@ -335,7 +366,10 @@ export function createApp(deps: AppDeps): Handler {
       sites: rows.map(({ site, st }) => ({ id: site.id, name: site.name, health: siteHealth(site, st) })),
     };
 
-    if (path === "/" && !isPost) return html(dashboard(rows, msg, isErr, {}, ctx));
+    if (path === "/" && !isPost) {
+      const sums = await appSummaries(db, rows.map((r) => r.uuid));
+      return html(dashboard(rows.map((r) => ({ site: r.site, st: r.st, app: sums.get(r.uuid) })), msg, isErr, {}, ctx));
+    }
 
     if (path === "/org/sec" && isPost) {
       const { org = "" } = await formData(req);
@@ -365,12 +399,32 @@ export function createApp(deps: AppDeps): Handler {
       const here = `/site/${slug}`;
       if (!action && !isPost) {
         await act("site.view", row.site.origin);
-        return html(siteDetail(row.site, row.st ?? initialState(), msg, isErr, ctx));
+        return renderDetail(row, msg, isErr);
       }
       if (!action || !isPost) return errorPage(405, "Desteklenmeyen istek.");
       if (!can.manageSites(role)) return deny(`site ${action}`);
       await act(`site.${action}`, row.site.origin);
       return siteAction(row, action, here);
+    }
+
+    const km = path.match(/^\/site\/([a-z0-9-]{1,60})\/anahtar\/(live|test)\/(olustur|yenile|iptal)$/);
+    if (km && isPost) {
+      const [, slug, mode, op] = km as unknown as [string, string, KeyMode, "olustur" | "yenile" | "iptal"];
+      const row = await getSite(db, orgId, slug);
+      if (!row) return errorPage(404, "Site bulunamadı.");
+      if (!can.manageSites(role)) return deny(`anahtar ${op}`);
+      const here = `/site/${slug}`;
+      const target = `${row.site.origin} · ${mode}`;
+      if (op === "iptal") {
+        if (!(await revokeKey(db, row.uuid, mode))) return redirect(withMsg(here, "İptal edilecek anahtar yok.", true));
+        await act("key.revoke", target);
+        return redirect(withMsg(here, `${mode === "live" ? "Canlı" : "Test"} anahtarı iptal edildi. Bu Site ID ile gelen istekler artık reddedilir.`));
+      }
+      const r = op === "olustur" ? await createKey(db, row.uuid, mode, cfg.appSecret, sess.userId) : await rotateKey(db, row.uuid, mode, cfg.appSecret);
+      if (!r) return redirect(withMsg(here, op === "olustur" ? "Bu modda zaten bir anahtar var; yenileyin ya da önce iptal edin." : "Yenilenecek anahtar yok; önce oluşturun.", true));
+      await act(op === "olustur" ? "key.create" : "key.rotate", target);
+      // Secret sadece bu cevapta görünür: yönlendirme yok, adres çubuğuna ya da loga düşmez
+      return renderDetail(row, op === "olustur" ? "Anahtar oluşturuldu." : "Secret yenilendi; eski secret artık geçersiz.", false, { mode, publicId: r.key.publicId, secret: r.secret });
     }
 
     if (path === "/ekip" && !isPost) {
@@ -463,6 +517,13 @@ export function createApp(deps: AppDeps): Handler {
     }
 
     return errorPage(404, "Sayfa bulunamadı.");
+
+    async function renderDetail(row: SiteRow, m: string | null, err: boolean, revealed?: Revealed): Promise<Response> {
+      const [keys, sums] = await Promise.all([listActiveKeys(db, row.uuid), appSummaries(db, [row.uuid], 50)]);
+      const app = sums.get(row.uuid);
+      const connection = connectionSection({ slug: row.site.id, keys, publicUrl: cfg.publicUrl, manage: can.manageSites(role), revealed, lastEventAt: app?.lastAt ?? null });
+      return html(siteDetail(row.site, row.st ?? initialState(), m, err, ctx, { app, connection, reveal: revealed ? revealBox(revealed, cfg.publicUrl, row.site.id) : undefined }));
+    }
 
     async function siteAction(row: SiteRow, action: string, here: string): Promise<Response> {
       switch (action) {

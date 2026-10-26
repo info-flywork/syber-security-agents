@@ -4,6 +4,7 @@
  */
 import { esc, ADVICE } from "./alert";
 import { ROLE_LABEL, can, type Role } from "./accounts";
+import { APP_EVENT_TYPES, APP_RISK_CAP, type AppEvent, type AppEventType, type AppSummary } from "./app-events";
 import type { CheckResult, Incident, Kind, RunPoint, Severity, SiteConfig, SiteEvent, SiteState } from "./types";
 
 export type Health = "unknown" | "ok" | "issues" | "down" | "paused";
@@ -56,7 +57,7 @@ export interface ExternalFeeds {
   aiSummary?: { text: string; at: string; model?: string };
 }
 
-type Row = { site: SiteConfig; st: SiteState | null };
+export type Row = { site: SiteConfig; st: SiteState | null; app?: AppSummary };
 
 /** Oturumdaki kullanıcı ve aktif organizasyon — menü, üst çubuk ve yetkiye göre düğmeler için. */
 export interface PanelCtx {
@@ -108,7 +109,7 @@ export const fmt = (iso: string | null) =>
   iso ? new Date(iso).toLocaleString("tr-TR", { timeZone: TZ, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 const clock = (ms: number) => new Date(ms).toLocaleTimeString("tr-TR", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 
-function ago(iso: string | null, now: number): string {
+export function ago(iso: string | null, now: number): string {
   if (!iso) return "—";
   const m = Math.round((now - Date.parse(iso)) / 60000);
   if (m < 1) return "az önce";
@@ -123,12 +124,19 @@ const safeHref = (h: string | undefined) => (h && (/^\/(?!\/)/.test(h) || /^http
 const openIncidents = (st: SiteState | null): Incident[] => (st ? Object.values(st.incidents).filter((i) => i.alerted) : []);
 const bySeverity = (a: { severity: Severity }, b: { severity: Severity }) => SEV[a.severity].rank - SEV[b.severity].rank;
 
-/** 0–100 arası risk puanı: açık bulguların ağırlıkları toplanır (duraklatılmış siteler hariç). */
-function riskScore(rows: Row[]): number | null {
-  const active = rows.filter((r) => !r.site.paused && r.st?.lastRun);
+/** Risk puanının parçaları: açık bulguların ağırlıkları + bağlı uygulamalardan gelen son 24 saatlik canlı olaylar (duraklatılmış siteler hariç). */
+function riskParts(rows: Row[]): { findings: number; app: number } | null {
+  const active = rows.filter((r) => !r.site.paused && (r.st?.lastRun || r.app?.lastAt));
   if (!active.length) return null;
-  const sum = active.flatMap((r) => openIncidents(r.st)).reduce((s, i) => s + SEV[i.severity].weight, 0);
-  return Math.min(100, sum);
+  const findings = active.flatMap((r) => openIncidents(r.st)).reduce((s, i) => s + SEV[i.severity].weight, 0);
+  const app = Math.min(APP_RISK_CAP, active.reduce((s, r) => s + (r.app?.risk ?? 0), 0));
+  return { findings, app };
+}
+
+/** 0–100 arası risk puanı. */
+function riskScore(rows: Row[]): number | null {
+  const p = riskParts(rows);
+  return p ? Math.min(100, p.findings + p.app) : null;
 }
 
 function riskLevel(score: number | null): [string, string] {
@@ -241,6 +249,12 @@ details.fold>summary .tog{font-size:13px;color:var(--accent)}details.fold[open] 
 .res{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.res .card{background:var(--panel2)}
 .res .line{font-size:12.5px;color:var(--muted);margin-top:3px;word-break:break-word}
 .crumb{font-size:13px;color:var(--muted);margin-bottom:12px}
+.codeline{display:flex;gap:8px;align-items:center;margin:4px 0 10px}.codeline code{flex:1;min-width:0;padding:7px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:7px;font-size:13px}
+.codeline button,.copy{padding:6px 10px;font-size:12px}
+.reveal{border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);background:var(--warnbg);border-radius:12px;padding:16px;margin-bottom:16px}.reveal code{background:var(--panel)}
+pre.code{margin:6px 0 0;padding:12px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;font:12.5px/1.6 var(--mono);overflow-x:auto;white-space:pre}
+.keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}.keys .card{background:var(--panel2)}
+details.howto{margin-top:12px;border:1px solid var(--line);border-radius:10px;padding:10px 14px}details.howto>summary{cursor:pointer;font-weight:600}details.howto ol{margin:8px 0 0;padding-left:20px}details.howto li{margin:6px 0}
 .center{max-width:420px;margin:8vh auto 0}
 @media (max-width:640px){.bar-in,main{padding-left:16px;padding-right:16px}.brand small{display:none}.hide-sm{display:none}.risk .num{font-size:34px}.kpi .v{font-size:22px}}
 `;
@@ -249,6 +263,7 @@ const LOGO = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke
 
 // Tema: varsayılan sistem tercihi; düğmeyle seçilen tema bu tarayıcıda hatırlanır.
 const THEME_INIT = `(function(){try{var t=localStorage.getItem('sg-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}})();
+function sgCopy(id,b){var el=document.getElementById(id);function done(ok){var o=b.dataset.l||b.textContent;b.dataset.l=o;b.textContent=ok?'Kopyalandı':'Seçildi — Ctrl/⌘+C';setTimeout(function(){b.textContent=o},2000)}function fb(){var r=document.createRange();r.selectNodeContents(el);var s=getSelection();s.removeAllRanges();s.addRange(r);var ok=false;try{ok=document.execCommand('copy')}catch(e){}done(ok)}if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(el.textContent).then(function(){done(true)},fb);else fb()}
 function sgTheme(){var r=document.documentElement,cur=r.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'),n=cur==='dark'?'light':'dark';r.dataset.theme=n;try{localStorage.setItem('sg-theme',n)}catch(e){}}`;
 
 const THEME_ICON = `<svg class="i-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><svg class="i-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`;
@@ -384,6 +399,33 @@ function eventItem(e: SiteEvent, site: SiteConfig | null, now: number): string {
 <span class="tx"><b>${esc(e.title)}</b> <span class="tag ${cls}" style="font-size:10.5px;padding:0 6px">${label}</span><span class="sm" title="${esc(e.detail)}">${site ? `${esc(site.name)} · ` : ""}${KIND_LABEL[e.kind]} · ${esc(e.detail)}</span></span></li>`;
 }
 
+const APP_MARK: Record<Severity, string> = { critical: "bad", high: "warn", info: "muted" };
+
+function appEventItem(a: AppEvent, site: SiteConfig | null, now: number): string {
+  const t = Date.parse(a.occurredAt);
+  const stamp = now - t < 20 * 3600_000 ? clock(t) : new Date(t).toLocaleDateString("tr-TR", { timeZone: TZ, day: "2-digit", month: "2-digit" });
+  const label = APP_EVENT_TYPES[a.type]?.label ?? a.type;
+  const detail = [a.actor, a.path, a.ip, a.message].filter(Boolean).join(" · ");
+  return `<li><span class="tm" title="${esc(fmt(a.occurredAt))}">${stamp}</span><span class="mk ${APP_MARK[a.severity]}"></span>
+<span class="tx"><b>${esc(label)}</b> <span class="tag muted" style="font-size:10.5px;padding:0 6px">Uygulama</span>${a.mode === "test" ? ' <span class="tag warn" style="font-size:10.5px;padding:0 6px">TEST</span>' : ""}${a.severity !== "info" ? ` <span class="tag sev ${SEV[a.severity].cls}" style="font-size:10px;padding:0 5px">${SEV[a.severity].label}</span>` : ""}<span class="sm" title="${esc(detail)}">${site ? `${esc(site.name)} · ` : ""}${esc(detail) || "ayrıntı yok"}</span></span></li>`;
+}
+
+/** Olay akışı: site kontrollerinin olayları + uygulamalardan gelen olaylar, en yeni önce. */
+function feedItems(rows: Row[], now: number, withSite = true): { at: number; html: string }[] {
+  const out: { at: number; html: string }[] = [];
+  for (const { site, st, app } of rows) {
+    for (const e of st?.events ?? []) out.push({ at: Date.parse(e.at), html: eventItem(e, withSite ? site : null, now) });
+    for (const a of app?.recent ?? []) out.push({ at: Date.parse(a.occurredAt), html: appEventItem(a, withSite ? site : null, now) });
+  }
+  return out.sort((a, b) => b.at - a.at);
+}
+
+const sumCounts = (rows: Row[]) => {
+  const c: Record<AppEventType, number> = { "auth.failed": 0, "request.suspicious": 0, "access.denied": 0, "app.error": 0 };
+  for (const r of rows) for (const k of Object.keys(c) as AppEventType[]) c[k] += r.app?.counts24[k] ?? 0;
+  return c;
+};
+
 export function emptyState(title: string, text: string): string {
   return `<div class="empty-state"><b>${esc(title)}</b>${esc(text)}</div>`;
 }
@@ -418,11 +460,22 @@ function ruleSummary(rows: Row[], now: number): string {
   if (hist.length) bullets.push(`Toplam erişilebilirlik <b>%${((hist.filter((p) => p.up).length / hist.length) * 100).toFixed(1)}</b> (${hist.length} kontrol).`);
   if (down.length) bullets.push(`Şu an erişilemeyen: ${down.map((r) => `<b>${esc(r.site.name)}</b>`).join(", ")}.`);
   if (crit.length) bullets.push(`Öncelik: ${crit.slice(0, 3).map((x) => `${esc(x.site.name)} — ${esc(x.i.title)}`).join("; ")}.`);
+  const appCounts = sumCounts(rows);
+  const appTotal = Object.values(appCounts).reduce((a, b) => a + b, 0);
+  if (appTotal)
+    bullets.push(
+      `Uygulamalardan son 24 saatte <b>${appTotal}</b> olay: ${(Object.keys(appCounts) as AppEventType[])
+        .filter((k) => appCounts[k])
+        .map((k) => `${appCounts[k]} ${APP_EVENT_TYPES[k].label.toLowerCase()}`)
+        .join(", ")}.`,
+    );
   const lead = crit.length || down.length
     ? "Acil müdahale gerektiren bulgu var."
     : open.some((x) => x.i.severity === "high")
       ? "Kritik sorun yok; yüksek önemli bulgular takip edilmeli."
-      : "Genel durum sakin; açık kritik ya da yüksek bulgu yok.";
+      : appCounts["request.suspicious"] + appCounts["access.denied"]
+        ? "Açık bulgu yok, ancak uygulamalarda şüpheli istek ya da yetkisiz erişim denemesi var."
+        : "Genel durum sakin; açık kritik ya da yüksek bulgu yok.";
   return `<p><b>${lead}</b></p><ul>${bullets.map((b) => `<li>${b}</li>`).join("")}</ul>`;
 }
 
@@ -530,7 +583,8 @@ export function dashboard(rows: Row[], msg: string | null, isErr: boolean, feeds
     .flatMap(({ site, st }) => openIncidents(st).map((i) => ({ i, site })))
     .sort((a, b) => bySeverity(a.i, b.i) || Date.parse(b.i.since) - Date.parse(a.i.since));
   const n = (s: Severity) => findings.filter((f) => f.i.severity === s).length;
-  const events = rows.flatMap(({ site, st }) => (st?.events ?? []).map((e) => ({ e, site }))).sort((a, b) => Date.parse(b.e.at) - Date.parse(a.e.at));
+  const events = feedItems(rows, now);
+  const parts = riskParts(rows);
   const history = rows.flatMap((r) => r.st?.history ?? []);
   const hist24 = history.filter((p) => Date.parse(p.at) >= now - 24 * 3600_000);
   const up24 = hist24.length ? `%${((hist24.filter((p) => p.up).length / hist24.length) * 100).toFixed(1)}` : "—";
@@ -542,7 +596,7 @@ export function dashboard(rows: Row[], msg: string | null, isErr: boolean, feeds
   const ips = feeds.blockedIps;
 
   const riskCard = `<section class="card"><header><h2>Genel risk puanı</h2><span class="tag ${riskCls}">${riskText}</span></header>
-<div class="risk">${gauge(score)}<div><div class="num">${score ?? "—"}<span class="of"> /100</span></div><div class="small" style="margin-top:6px">Açık bulguların ağırlıklı toplamı<br>Kritik 30 · Yüksek 12 · Öneri 2</div></div></div>
+<div class="risk">${gauge(score)}<div><div class="num">${score ?? "—"}<span class="of"> /100</span></div><div class="small" style="margin-top:6px">${parts?.app ? `Bulgular ${parts.findings} + uygulama olayları ${parts.app}` : "Açık bulguların ağırlıklı toplamı"}<br>Kritik 30 · Yüksek 12 · Öneri 2</div></div></div>
 <div class="prot"><div class="row"><span>Koruma durumu</span><span class="tag ${prot[1]}">${prot[0]}</span></div>
 <div class="row"><span>Aktif izleme</span><span>${active.length} / ${rows.length} varlık${paused ? ` · ${paused} duraklatıldı` : ""}</span></div>
 <div class="row"><span>Geciken kontrol</span><span>${stale.length ? `<span style="color:var(--warn)">${stale.length} varlık</span>` : "yok"}</span></div>
@@ -564,17 +618,25 @@ ${kpi("aksiyonlar", "Bekleyen aksiyon", actions.length, urgentActions ? "high" :
   const aiCard = `<section class="card ai"><header><h2>Günlük özet</h2><span class="chip">${ai ? "Yapay zekâ" : "Kural tabanlı"}</span></header>
 ${ai ? `<p style="white-space:pre-line">${esc(ai.text)}</p><div class="src">${esc(ai.model ?? "Yapay zekâ")} · ${esc(fmt(ai.at))}</div>` : `${ruleSummary(rows, now)}<div class="src">Yapay zekâ özeti henüz bağlı değil; bu özet panel verilerinden otomatik üretildi.</div>`}</section>`;
 
+  const appCounts = sumCounts(rows);
+  const linked = rows.filter((r) => r.app?.lastSeen).length;
+  const appCard = `<section class="card"><header><h2>Uygulama olayları · 24 saat</h2><span class="count">${linked}/${rows.length} varlık bağlı</span></header>
+<div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr))">${(Object.keys(APP_EVENT_TYPES) as AppEventType[])
+    .map((k) => `<div class="kpi"><div class="l">${APP_EVENT_TYPES[k].label}</div><div class="v ${appCounts[k] && APP_EVENT_TYPES[k].severity !== "info" ? "high" : ""}">${appCounts[k]}</div></div>`)
+    .join("")}</div>
+<p class="small" style="margin:10px 0 0">${linked ? "Sadece canlı (live) anahtarların olayları sayılır ve risk puanına yansır." : "Varlık sayfasındaki Bağlantı bölümünden uygulamanızı bağlayın."}</p></section>`;
+
   const urgent = findings.filter((f) => f.i.severity !== "info");
   const priorityCard = `<section class="card"><header><h2>Öncelikli bulgular</h2><span class="count">${urgent.length} kritik / yüksek</span></header>
 ${urgent.length ? `<ul class="find">${urgent.slice(0, 3).map((f) => findingItem(f.i, f.site, now)).join("")}</ul>` : emptyState("Kritik ya da yüksek bulgu yok", rows.length ? "Sadece öneri seviyesinde bulgular var." : "Henüz izlenen varlık yok.")}
 <a class="more" href="#bulgular">Tüm bulgular (${findings.length}) →</a></section>`;
 
   const recentCard = `<section class="card"><header><h2>Son olaylar</h2></header>
-${events.length ? `<ul class="feed">${events.slice(0, 6).map((x) => eventItem(x.e, x.site, now)).join("")}</ul><a class="more" href="#olaylar">Olay akışı →</a>` : emptyState("Olay yok", "Bulgu açıldığında ya da düzeldiğinde burada görünür.")}</section>`;
+${events.length ? `<ul class="feed">${events.slice(0, 6).map((x) => x.html).join("")}</ul><a class="more" href="#olaylar">Olay akışı →</a>` : emptyState("Olay yok", "Bulgu açıldığında ya da düzeldiğinde burada görünür.")}</section>`;
 
   const genel = `<section data-view="genel">${viewHead("Genel bakış", `${prot[0]} · ${clock(now)} itibarıyla`)}
 <div class="grid g-top">${riskCard}${kpis}</div>
-<div class="grid g-main sec"><div class="stack">${chartCard}${priorityCard}</div><div class="stack">${aiCard}${recentCard}</div></div></section>`;
+<div class="grid g-main sec"><div class="stack">${chartCard}${priorityCard}</div><div class="stack">${aiCard}${appCard}${recentCard}</div></div></section>`;
 
   const varliklar = `<section data-view="varliklar">${viewHead("Varlıklar", "İzlenen web siteleri ve bağlanacak diğer kaynaklar", manage ? `<a class="btn" href="#ekle">+ Site ekle</a>` : "")}
 <div class="assets">${rows.map((r) => assetCard(r, now)).join("")}${ext.map(externalAssetCard).join("")}
@@ -584,8 +646,8 @@ ${missing.map(([k, t]) => `<div class="asset empty"><div class="top"><span class
   const bulgular = `<section data-view="bulgular">${viewHead("Bulgular", `Önem sırasına göre · ${n("critical")} kritik, ${n("high")} yüksek, ${n("info")} öneri`)}
 <section class="card">${findings.length ? `<ul class="find">${findings.map((f) => findingItem(f.i, f.site, now)).join("")}</ul>` : emptyState("Açık bulgu yok", rows.length ? "Tüm kontroller temiz geçti." : "Henüz izlenen varlık yok.")}</section></section>`;
 
-  const olaylar = `<section data-view="olaylar">${viewHead("Olay akışı", "Tüm sitelerde açılan, düzelen ve bildirilen olaylar")}
-<section class="card">${events.length ? `<ul class="feed">${events.slice(0, 100).map((x) => eventItem(x.e, x.site, now)).join("")}</ul>${events.length > 100 ? `<p class="small">Son 100 olay gösteriliyor; daha eskiler site sayfalarında.</p>` : ""}` : emptyState("Olay yok", "Bulgu açıldığında ya da düzeldiğinde burada görünür.")}</section></section>`;
+  const olaylar = `<section data-view="olaylar">${viewHead("Olay akışı", "Site kontrolleri ve bağlı uygulamalardan gelen olaylar")}
+<section class="card">${events.length ? `<ul class="feed">${events.slice(0, 100).map((x) => x.html).join("")}</ul>${events.length > 100 ? `<p class="small">Son 100 olay gösteriliyor; daha eskiler site sayfalarında.</p>` : ""}` : emptyState("Olay yok", "Bulgu açıldığında ya da düzeldiğinde burada görünür.")}</section></section>`;
 
   const aksiyonlar = `<section data-view="aksiyonlar">${viewHead("Onay bekleyen aksiyonlar", "İnsan kararı gerektiren işlemler")}
 <section class="card">${actions.length ? `<ul class="list">${actions.map((a) => `<li><span class="tag sev ${SEV[a.severity].cls}">${SEV[a.severity].label}</span><span class="grow"><b>${esc(a.title)}</b><br><span class="sm">${esc(a.detail)}</span></span>${safeHref(a.href) ? `<a class="btn" href="${safeHref(a.href)}">İncele</a>` : `<span class="chip">${esc(a.source)}</span>`}</li>`).join("")}</ul>` : emptyState("Bekleyen aksiyon yok", "Onayınızı gerektiren bir işlem bulunmuyor.")}</section></section>`;
@@ -627,17 +689,26 @@ function resultsByKind(results: CheckResult[]): string {
     .join("")}</div>`;
 }
 
-export function siteDetail(site: SiteConfig, st: SiteState | null, msg: string | null, isErr: boolean, ctx: PanelCtx = DEFAULT_CTX): string {
+export function siteDetail(
+  site: SiteConfig,
+  st: SiteState | null,
+  msg: string | null,
+  isErr: boolean,
+  ctx: PanelCtx = DEFAULT_CTX,
+  extra: { app?: AppSummary; connection?: string; reveal?: string } = {},
+): string {
   const now = Date.now();
   const manage = can.manageSites(ctx.role);
   const h = siteHealth(site, st);
   const open = openIncidents(st).sort(bySeverity);
-  const score = riskScore([{ site: { ...site, paused: false }, st }]);
+  const score = riskScore([{ site: { ...site, paused: false }, st, app: extra.app }]);
+  const feed = feedItems([{ site, st, app: extra.app }], now, false);
+  const appTotal = Object.values(extra.app?.counts24 ?? {}).reduce((a, b) => a + b, 0);
   const [riskText, riskCls] = riskLevel(score);
   const worst = open.some((i) => i.severity === "critical") ? "crit" : open.some((i) => i.severity === "high") ? "high" : "ok";
   const btn = (action: string, label: string, extra = "") =>
     `<form class="inline" method="post" action="/site/${esc(site.id)}/${action}"${extra}><button${action === "delete" ? ' class="danger"' : action === "run" ? ' class="primary"' : ""}>${label}</button></form>`;
-  const body = `<div class="crumb"><a href="/">Panel</a> / <a href="/#varliklar">Varlıklar</a> / ${esc(site.name)}</div>${flash(msg, isErr)}
+  const body = `<div class="crumb"><a href="/">Panel</a> / <a href="/#varliklar">Varlıklar</a> / ${esc(site.name)}</div>${flash(msg, isErr)}${extra.reveal ?? ""}
 <section class="card"><div style="display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-start">
 <div style="min-width:0"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="ty">WEB</span><h1>${esc(site.name)}</h1><span class="tag ${HEALTH[h][1]}">${HEALTH[h][0]}</span></div>
 <a class="small" style="font-family:var(--mono);word-break:break-all" href="${esc(site.origin)}" rel="noopener noreferrer" target="_blank">${esc(site.origin)}</a></div>
@@ -647,6 +718,7 @@ ${btn("reset", "Script referansını sıfırla", ` onsubmit="return confirm('Say
 <div class="kpi"><div class="l">Risk puanı</div><div class="v">${score ?? "—"}</div><div class="s"><span class="tag ${riskCls}">${riskText}</span></div></div>
 <div class="kpi"><div class="l">Açık bulgu</div><div class="v ${worst}">${open.filter((i) => i.severity !== "info").length}</div><div class="s">${open.filter((i) => i.severity === "info").length} öneri ayrıca</div></div>
 <div class="kpi"><div class="l">24 saat erişim</div><div class="v">${uptimePct(st)}</div><div class="s">${st?.history.length ?? 0} kontrol</div></div>
+<div class="kpi"><div class="l">Uygulama olayları</div><div class="v">${extra.app?.lastSeen ? appTotal : "—"}</div><div class="s">${extra.app?.lastSeen ? `son 24 saat · risk +${extra.app.risk}` : "uygulama bağlı değil"}</div></div>
 <div class="kpi"><div class="l">Son kontrol</div><div class="v" style="font-size:18px;padding:5px 0 3px">${ago(st?.lastRun ?? null, now)}</div><div class="s">${st?.lastRun ? `${st.lastDurationMs} ms · toplam ${st.runs} kontrol` : "henüz yok"}</div></div>
 </div>
 <dl class="kv" style="margin-top:16px"><dt>Sıklık</dt><dd>${site.intervalMin} dakika</dd>
@@ -654,9 +726,10 @@ ${btn("reset", "Script referansını sıfırla", ` onsubmit="return confirm('Say
 <div class="grid g-main sec"><section class="card"><header><h2>Bulgular · önem sırasına göre</h2><span class="count">${open.length} açık</span></header>
 ${open.length ? `<ul class="find">${open.map((i) => findingItem(i, null, now)).join("")}</ul>` : emptyState("Açık bulgu yok", st?.lastRun ? "Son kontrolde sorun bulunmadı." : "Henüz kontrol yapılmadı.")}</section>
 <section class="card"><header><h2>24 saatlik erişim</h2></header>${accessChart(st?.history ?? [], now)}</section></div>
+${extra.connection ?? ""}
 <section class="card sec"><header><h2>Son kontrol sonuçları</h2><span class="count">${st?.lastRun ? fmt(st.lastRun) : ""}</span></header>${st?.lastResults.length ? resultsByKind(st.lastResults) : emptyState("Henüz kontrol yapılmadı", '"Şimdi kontrol et"e basın.')}</section>
-<section class="card sec"><header><h2>Olay geçmişi</h2><span class="count">${st?.events.length ?? 0}</span></header>${
-    st?.events.length ? `<ul class="feed scroll">${st.events.slice(0, 50).map((e) => eventItem(e, null, now)).join("")}</ul>` : emptyState("Olay yok", "Bulgu açıldığında ya da düzeldiğinde burada görünür.")
+<section class="card sec"><header><h2>Olay geçmişi</h2><span class="count">${feed.length}</span></header>${
+    feed.length ? `<ul class="feed scroll">${feed.slice(0, 80).map((x) => x.html).join("")}</ul>` : emptyState("Olay yok", "Bulgu açıldığında, düzeldiğinde ya da uygulamanızdan olay geldiğinde burada görünür.")
   }</section>
 ${manage ? `<details class="card fold sec"><summary><h2>Ayarlar</h2>${toggle("Düzenle")}</summary><form method="post" action="/site/${esc(site.id)}/edit" style="margin-top:6px">
 <label for="name">Görünen ad</label><input id="name" type="text" name="name" value="${esc(site.name)}">

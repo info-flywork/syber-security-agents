@@ -50,6 +50,9 @@ export const AUDIT_LABEL: Record<string, string> = {
   "site.reset": "Script referansını sıfırladı",
   "site.test-mail": "Test e-postası gönderdi",
   "site.view": "Site sayfasını görüntüledi",
+  "key.create": "API anahtarı oluşturdu",
+  "key.rotate": "API secret'ını yeniledi",
+  "key.revoke": "API anahtarını iptal etti",
   "audit.view": "Erişim kaydını görüntüledi",
   "access.denied": "Yetkisiz işlem denemesi",
 };

@@ -4,6 +4,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import cron from "node-cron";
 import { createApp, type AppDeps } from "./app";
+import { pruneNonces } from "./apikeys";
+import { pruneAppEvents } from "./app-events";
 import { pruneOld } from "./audit";
 import { loadConfig } from "./config";
 import { createPool, migrate, type Db } from "./db";
@@ -101,7 +103,8 @@ async function main(): Promise<void> {
   const tasks = cfg.cron
     ? [
         cron.schedule("*/5 * * * *", () => tick(monitor).catch((e) => console.error("zamanlayıcı hatası:", e)), { noOverlap: true, name: "kontroller" }),
-        cron.schedule("17 3 * * *", () => pruneOld(db).catch((e) => console.error("temizlik hatası:", e)), { name: "temizlik", timezone: "Europe/Istanbul" }),
+        cron.schedule("*/5 * * * *", () => pruneNonces(db).catch((e) => console.error("nonce temizliği hatası:", e)), { name: "nonce" }),
+        cron.schedule("17 3 * * *", () => Promise.all([pruneOld(db), pruneAppEvents(db)]).catch((e) => console.error("temizlik hatası:", e)), { name: "temizlik", timezone: "Europe/Istanbul" }),
       ]
     : [];
 

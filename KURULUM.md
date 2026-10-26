@@ -211,6 +211,15 @@ Panelde **Site ekle** menüsünü açın, sonra her site sayfasında **Test e-po
 
 ---
 
+## 8. Uygulamaları bağlayın (isteğe bağlı)
+
+1. Varlık sayfasında **Bağlantı → Anahtar oluştur** düğmesine basın.
+2. Gösterilen `.env` satırlarını uygulamanın sunucusuna kaydedin. Secret bir daha gösterilmez.
+3. İstemciyi indirin. PHP için: `curl -o sitegozcu.php https://srv1548849.hstgr.cloud/istemci/sitegozcu.php`
+4. Bağlantıyı deneyin: `php sitegozcu.php test`
+
+Uygulamanın sunucu saati doğru olmalı. İmzalar en fazla 5 dakika sapmaya izin verir; saati eşitlemek için `timedatectl set-ntp true` kullanın.
+
 ## Güncelleme
 
 Mac'ten 3. adımdaki `rsync` komutunu tekrar çalıştırın, sonra sunucuda:
@@ -261,6 +270,8 @@ docker compose exec app node dist/cli.js unlock <e-posta>           # 5 hatalı 
 | Tarayıcıda Traefik `404 page not found` | `TRAEFIK_NETWORK` yanlış ya da `DOMAIN` farklı → `docker compose config` çıktısındaki etiketleri kontrol edin |
 | Sertifika hatası / "TRAEFIK DEFAULT CERT" | `CERT_RESOLVER` adı yanlış ya da alan adı sunucuya çözülmüyor → `docker logs $TRAEFIK 2>&1 \| grep -i acme` |
 | POST'larda "Geçersiz istek kaynağı" | `PUBLIC_URL` tarayıcıdaki adresle birebir aynı değil (http/https, alt alan adı) |
+| İstemci: `HTTP 401: zaman damgası …` | Uygulama sunucusunun saati 5 dakikadan fazla kaymış → `timedatectl set-ntp true` |
+| İstemci: `HTTP 401: imza geçersiz` | Secret yanlış ya da yenilenmiş / anahtar iptal edilmiş → panelden yenileyip `.env`'i güncelleyin |
 
 ## Eski Cloudflare kurulumu
 

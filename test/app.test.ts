@@ -5,6 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { changeMember, createInvite, createOrg } from "../src/accounts";
+import { signRequest } from "../src/apikeys";
 import { createApp } from "../src/app";
 import type { Config } from "../src/config";
 import { createPool, migrate, type Db } from "../src/db";
@@ -56,6 +57,13 @@ describe.skipIf(!DB_URL)("panel (PostgreSQL)", () => {
     return decryptSecret(rows[0].totp_secret, cfg.appSecret);
   }
   const code = (secret: string, offset = 0) => totpAt(secret, Math.floor(Date.now() / 30_000) + offset);
+  /** Kullanıcının en son kabul edilen adımı ve ondan sonraki ilk geçerli adımın kodu (30 sn sınırından bağımsız). */
+  async function steps(email: string, secret: string) {
+    const { rows } = await db.query<{ s: string }>("SELECT totp_last_step::text AS s FROM users WHERE email = $1", [email]);
+    const last = Number(rows[0].s);
+    const now = Math.floor(Date.now() / 30_000);
+    return { used: totpAt(secret, last), fresh: totpAt(secret, Math.max(now, last + 1)) };
+  }
 
   /** Davetle kayıt + 2FA kurulumu; kurtarma kodlarını döner. */
   async function onboard(b: ReturnType<typeof browser>, token: string, email: string) {
@@ -181,8 +189,9 @@ describe.skipIf(!DB_URL)("panel (PostgreSQL)", () => {
     expect((await alice.post("/login", { email: "alice@arcon.test", password: "yanlis-sifre-123" })).status).toBe(401);
     expect((await alice.post("/login", { email: "alice@arcon.test", password: "Mavi-Kedi-Kosar-77" })).location).toBe("/2fa");
     expect((await alice.get("/")).location).toBe("/2fa");
-    expect((await alice.post("/2fa", { code: code(aliceSecret) })).status).toBe(401); // kurulumda kullanılmıştı
-    expect((await alice.post("/2fa", { code: code(aliceSecret, 1) })).location).toBe("/");
+    const s = await steps("alice@arcon.test", aliceSecret);
+    expect((await alice.post("/2fa", { code: s.used })).status).toBe(401); // kurulumda kullanılmıştı
+    expect((await alice.post("/2fa", { code: s.fresh })).location).toBe("/");
 
     await alice.post("/logout");
     await alice.post("/login", { email: "alice@arcon.test", password: "Mavi-Kedi-Kosar-77" });
@@ -198,6 +207,49 @@ describe.skipIf(!DB_URL)("panel (PostgreSQL)", () => {
     expect((await db.query("SELECT 1 FROM sites WHERE slug = 'csrf-com'")).rowCount).toBe(0);
   });
 
+  it("Bağlantı: secret bir kez gösterilir, olay gelince 'Bağlandı'; görüntüleyen anahtar yönetemez", async () => {
+    const created = await alice.post("/site/ornek-com/anahtar/live/olustur");
+    expect(created.status).toBe(200);
+    expect(created.text).toContain("sadece şimdi gösteriliyor");
+    const secret = created.text.match(/sg_live_sk_[A-Za-z0-9_-]{43}/)![0];
+    const pk = created.text.match(/sg_live_pk_[A-Za-z0-9_-]+/)![0];
+
+    const reload = await alice.get("/site/ornek-com");
+    expect(reload.text).not.toContain(secret);
+    expect(reload.text).toContain(pk);
+    expect(reload.text).toContain("Bekleniyor");
+    expect((await alice.post("/site/ornek-com/anahtar/live/olustur")).location).toMatch(/e=1$/); // zaten var
+
+    const send = (sk: string) => {
+      const body = JSON.stringify({ events: [{ type: "auth.failed", actor: "saldirgan@x.test" }] });
+      return app(new Request(`${PUBLIC}/api/v1/events`, { method: "POST", headers: signRequest({ publicId: pk, secret: sk, body }), body }), { ip: "203.0.113.1" });
+    };
+    expect((await send(secret)).status).toBe(202);
+    const after = await alice.get("/site/ornek-com");
+    expect(after.text).toContain("Bağlandı");
+    expect(after.text).toContain("saldirgan@x.test");
+    expect((await alice.get("/")).text).toContain("Başarısız giriş");
+
+    const { token } = await createInvite(db, orgA, "izleyici@arcon.test", "viewer", null);
+    const v = browser("10.0.0.20");
+    await onboard(v, token, "izleyici@arcon.test");
+    const vp = await v.get("/site/ornek-com");
+    expect(vp.text).toContain(pk);
+    expect(vp.text).not.toContain("/anahtar/live/yenile");
+    expect((await v.post("/site/ornek-com/anahtar/live/yenile")).status).toBe(403);
+    expect((await v.post("/site/ornek-com/anahtar/live/iptal")).status).toBe(403);
+
+    const rotated = await alice.post("/site/ornek-com/anahtar/live/yenile");
+    const newSecret = rotated.text.match(/sg_live_sk_[A-Za-z0-9_-]{43}/)![0];
+    expect(newSecret).not.toBe(secret);
+    expect((await send(secret)).status).toBe(401);
+    expect((await send(newSecret)).status).toBe(202);
+
+    const dl = await browser("10.0.0.21").get("/istemci/sitegozcu.php");
+    expect(dl.status).toBe(200);
+    expect(dl.text).toContain("final class SiteGozcu");
+  });
+
   it("5 hatalı şifrede hesap kilitlenir; erişim kaydı tutulur", async () => {
     const mallory = browser("10.0.0.66");
     for (let i = 0; i < 5; i++) await mallory.post("/login", { email: "bob@baska.test", password: `yanlis-${i}-xxxxxxx` });
@@ -210,6 +262,8 @@ describe.skipIf(!DB_URL)("panel (PostgreSQL)", () => {
     expect(log.text).toContain("Hatalı şifre");
     expect(log.text).toContain("Kurtarma koduyla giriş");
     expect(log.text).toContain("Davet gönderdi");
+    expect(log.text).toContain("API anahtarı oluşturdu");
+    expect(log.text).toContain("API secret&#39;ını yeniledi");
     // Başka organizasyonun kayıtları görünmez
     expect(log.text).not.toContain("bob@baska.test");
   });

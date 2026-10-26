@@ -133,19 +133,20 @@ export const normalizeRecovery = (s: string) => s.toLowerCase().replace(/[^a-z2-
 
 // ——— 2FA sırrını veritabanında şifreli tutma (AES-256-GCM) ———
 
-const keyFrom = (appSecret: string) => createHash("sha256").update("site-gozcu:totp:" + appSecret).digest();
+/** Her kullanım alanı (2FA sırrı, API imza anahtarı) APP_SECRET'tan ayrı bir şifreleme anahtarı türetir. */
+const keyFrom = (appSecret: string, context: string) => createHash("sha256").update(`site-gozcu:${context}:` + appSecret).digest();
 
-export function encryptSecret(plain: string, appSecret: string): string {
+export function encryptSecret(plain: string, appSecret: string, context = "totp"): string {
   const iv = randomBytes(12);
-  const c = createCipheriv("aes-256-gcm", keyFrom(appSecret), iv);
+  const c = createCipheriv("aes-256-gcm", keyFrom(appSecret, context), iv);
   const enc = Buffer.concat([c.update(plain, "utf8"), c.final()]);
   return `v1.${iv.toString("base64")}.${c.getAuthTag().toString("base64")}.${enc.toString("base64")}`;
 }
 
-export function decryptSecret(stored: string, appSecret: string): string {
+export function decryptSecret(stored: string, appSecret: string, context = "totp"): string {
   const [v, iv, tag, data] = stored.split(".");
   if (v !== "v1") throw new Error("bilinmeyen şifreleme sürümü");
-  const d = createDecipheriv("aes-256-gcm", keyFrom(appSecret), Buffer.from(iv, "base64"));
+  const d = createDecipheriv("aes-256-gcm", keyFrom(appSecret, context), Buffer.from(iv, "base64"));
   d.setAuthTag(Buffer.from(tag, "base64"));
   return Buffer.concat([d.update(Buffer.from(data, "base64")), d.final()]).toString("utf8");
 }

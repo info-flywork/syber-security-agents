@@ -41,6 +41,46 @@ Sunucuya kurulum: **[KURULUM.md](KURULUM.md)**
 - **Oturum:** Rastgele belirteç; veritabanında sadece SHA-256 özeti tutulur. 12 saat işlem yapılmazsa ya da en geç 7 günde kapanır. Şifre değişince diğer cihazlardaki oturumlar kapanır. Çerez `HttpOnly`, `SameSite=Lax`, HTTPS'te `__Host-` önekli ve `Secure`. Form istekleri ayrıca Origin kontrolüyle korunur (CSRF).
 - **Erişim kaydı:** Girişler, hatalı denemeler, 2FA, davetler, rol değişiklikleri, site işlemleri ve yetkisiz işlem denemeleri; kim, ne zaman, hangi IP ve tarayıcıdan yaptı. Sahip ve yöneticiler panelde görür. Kayıtlar 1 yıl saklanır.
 
+## Uygulama bağlantısı (API anahtarları)
+
+Web sitenizin ya da API'nizin kendi içinden güvenlik olaylarını panele göndermesi için. Varlık sayfasındaki **Bağlantı** bölümünden yönetilir.
+
+- **Anahtarlar:** Her varlık için bir **canlı (live)** ve bir **test** anahtarı oluşturulabilir.
+  - Site ID (`sg_live_pk_…`) açıktır.
+  - Secret (`sg_live_sk_…`) **sadece oluşturulduğu ya da yenilendiği anda bir kez** gösterilir.
+  - Test anahtarının olayları akışta `TEST` etiketiyle görünür, risk puanına yansımaz.
+- **Saklama:** Secret veritabanında tutulmaz. Sunucu sadece secret'tan tek yönlü türetilen imza anahtarını (`HMAC-SHA256(secret, "sitegozcu/v1/signing")`) saklar; o da `APP_SECRET` ile AES-256-GCM şifrelidir. Sahte olay yazmak için hem veritabanı hem `APP_SECRET` ele geçirilmelidir.
+- **Yenile / İptal:**
+  - **Secret'ı yenile:** Site ID aynı kalır, eski secret anında geçersiz olur.
+  - **İptal et:** Site ID kalıcı olarak kapanır.
+  - Bu işlemleri sahip ve yönetici yapar; görüntüleyen sadece Site ID'yi ve durumu görür.
+- **Durum:**
+  - **Bağlandı:** Canlı anahtarla en az bir geçerli istek geldi.
+  - **Bekleniyor:** Anahtar var ama henüz istek gelmedi.
+  - Son olay zamanı da gösterilir.
+- **`POST /api/v1/events`:**
+  - İstek HMAC-SHA256 ile imzalanır; secret ağda gönderilmez.
+  - Zaman damgası sunucu saatinden en fazla **5 dakika** farklı olabilir. Aynı nonce ikinci kez kabul edilmez (tekrar oynatma koruması).
+  - Olay her zaman **anahtarın kendi varlığına** yazılır; gövdede başka bir varlık seçilemez.
+  - İstek sınırı: anahtar başına dakikada 120, IP başına dakikada 300 istek; istek başına en fazla 50 olay.
+- **Olay türleri:**
+
+  | Tür | Varsayılan önem | Risk katkısı |
+  |---|---|---|
+  | `auth.failed` — başarısız giriş | Öneri | 0,5 |
+  | `request.suspicious` — şüpheli istek | Yüksek | 5 |
+  | `access.denied` — yetkisiz erişim denemesi | Yüksek | 5 |
+  | `app.error` — uygulama hatası | Öneri | 0,5 |
+
+  Önem istekte `info`, `high` ya da `critical` (15 puan) olarak değiştirilebilir. Son 24 saatin canlı olayları toplanır; varlık başına en fazla 50 puan eklenir. Olaylar 30 gün saklanır.
+- **İstemciler:** Tek dosyadır ve bağımlılık gerektirmez. Panelden indirilir: `/istemci/sitegozcu.php` (PHP 7.4+) ve `/istemci/sitegozcu.mjs` (Node 18+). İkisi de hata fırlatmaz ve 2 saniyede zaman aşımına uğrar; panele ulaşılamasa da uygulama etkilenmez. `php sitegozcu.php test` ya da `node --env-file=.env sitegozcu.mjs test` bağlantıyı dener.
+
+```
+SITEGOZCU_URL=https://srv1548849.hstgr.cloud
+SITEGOZCU_SITE_ID=sg_live_pk_…
+SITEGOZCU_SECRET=sg_live_sk_…
+```
+
 ## Panel
 
 Site sayfasındaki butonlar (Sahip ve Yönetici):
@@ -69,7 +109,7 @@ Yerel `DATABASE_URL`: `postgres://sitegozcu:yerel-gelistirme@127.0.0.1:55432/sit
 ```bash
 npm test             # birim testleri
 npm run typecheck
-# Uçtan uca (gerçek PostgreSQL; test veritabanı her çalıştırmada SIFIRLANIR):
+# Uçtan uca (gerçek PostgreSQL; test veritabanı her çalıştırmada SIFIRLANIR; PHP kuruluysa PHP istemcisi de denenir):
 docker exec site-gozcu-dev-db createdb -U sitegozcu sitegozcu_test
 TEST_DATABASE_URL=postgres://sitegozcu:yerel-gelistirme@127.0.0.1:55432/sitegozcu_test npm test
 ```
@@ -85,4 +125,6 @@ TEST_DATABASE_URL=postgres://sitegozcu:yerel-gelistirme@127.0.0.1:55432/sitegozc
 | `src/app.ts`, `src/server.ts` | HTTP yönlendirici, Node sunucusu + node-cron zamanlayıcı |
 | `src/ui.ts`, `src/ui-account.ts` | Panel ve hesap ekranları |
 | `src/net.ts`, `src/mail.ts`, `src/smtp.ts` | İç ağ korumalı fetch, e-posta |
+| `src/apikeys.ts`, `src/ingest.ts`, `src/app-events.ts`, `src/ui-connect.ts` | API anahtarları ve imza, olay alma API'si, uygulama olayları, Bağlantı bölümü |
+| `clients/php/sitegozcu.php`, `clients/node/sitegozcu.mjs` | Tek dosyalık istemciler |
 | `src/db.ts`, `src/cli.ts`, `src/config.ts` | Şema göçleri, yönetim komutları, ortam değişkenleri |
