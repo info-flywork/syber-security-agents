@@ -3,6 +3,7 @@ import { evaluate, mailworthy } from "../src/incidents";
 import { buildAlert } from "../src/alert";
 import { parseSiteInput } from "../src/site-input";
 import { RateLimiter, readCookie, safeNext, sameOrigin, sessionCookie } from "../src/auth";
+import { loadConfig } from "../src/config";
 import { dashboard, siteDetail, siteHealth, uptimePct } from "../src/ui";
 import type { CheckResult, SiteConfig, SiteState } from "../src/types";
 
@@ -140,5 +141,16 @@ describe("geçici hata", () => {
     expect(Object.keys(s.incidents)).toEqual(["exposed:/.env"]);
     s = evaluate(s.incidents, [env(true)], "t3");
     expect(s.resolved).toHaveLength(1);
+  });
+});
+
+describe("yerel giriş atlaması", () => {
+  const base = { APP_SECRET: "x".repeat(40), DATABASE_URL: "postgres://x", DEV_NO_AUTH: "1" };
+  it("sadece yerel adresle açılır; sunucu adresiyle uygulama başlamaz", () => {
+    expect(loadConfig({ ...base, PUBLIC_URL: "http://127.0.0.1:3100" }).devNoAuth).toBe(true);
+    expect(loadConfig({ ...base, PUBLIC_URL: "http://localhost:3100" }).devNoAuth).toBe(true);
+    expect(() => loadConfig({ ...base, PUBLIC_URL: "https://srv1548849.hstgr.cloud" })).toThrow(/sadece yerel/);
+    expect(() => loadConfig({ ...base, PUBLIC_URL: "http://127.0.0.1:3100", TRUST_PROXY: "1" })).toThrow(/sadece yerel/);
+    expect(loadConfig({ ...base, DEV_NO_AUTH: "0", PUBLIC_URL: "https://srv1548849.hstgr.cloud" }).devNoAuth).toBe(false);
   });
 });

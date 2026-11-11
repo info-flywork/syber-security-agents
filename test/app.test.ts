@@ -21,6 +21,8 @@ const cfg: Config = {
   trustProxy: false,
   allowPrivate: false,
   cron: false,
+  devNoAuth: false,
+  devUser: null,
   smtp: { host: "", port: 465, secure: "tls", user: "", pass: "", from: "x@panel.test", fromName: "" },
 };
 
@@ -266,5 +268,22 @@ describe.skipIf(!DB_URL)("panel (PostgreSQL)", () => {
     expect(log.text).toContain("API secret&#39;ını yeniledi");
     // Başka organizasyonun kayıtları görünmez
     expect(log.text).not.toContain("bob@baska.test");
+    // Her hatalı giriş kasıtlı olarak 0,4–0,8 sn bekletilir; 6 deneme varsayılan 5 sn sınırını aşabilir
+  }, 20_000);
+
+  it("yerel geliştirme: DEV_NO_AUTH sadece bu bilgisayardan gelen isteklerde girişi atlar", async () => {
+    const dev = createApp({ cfg: { ...cfg, publicUrl: "http://127.0.0.1:3100", devNoAuth: true, devUser: "alice@arcon.test" }, db, monitor: { db, fetchFn: fakeFetch, mailer: null, publicUrl: PUBLIC }, mailer: null });
+    const get = (ip: string, cookie = "", host = "127.0.0.1") => dev(new Request(`http://${host}:3100/`, { headers: { cookie } }), { ip });
+    const r = await get("127.0.0.1");
+    expect(r.status).toBe(303);
+    const c = r.headers.get("set-cookie")!.split(";")[0];
+    const home = await get("127.0.0.1", c);
+    expect(home.status).toBe(200);
+    expect(await home.text()).toContain("alice@arcon.test");
+    // Başka bir bilgisayardan gelen istek için giriş istenir
+    expect((await get("192.168.1.20")).headers.get("location")).toBe("/login");
+    // localhost'tan gelen form da kabul edilir
+    const post = await dev(new Request("http://localhost:3100/org/sec", { method: "POST", headers: { cookie: c, origin: "http://localhost:3100" }, body: new URLSearchParams({ org: orgA }) }), { ip: "127.0.0.1" });
+    expect(post.status).toBe(303);
   });
 });

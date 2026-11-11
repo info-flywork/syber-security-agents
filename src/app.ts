@@ -132,6 +132,10 @@ function inviteMail(orgName: string, role: Role, inviter: string, link: string):
 export function createApp(deps: AppDeps): Handler {
   const { cfg, db, monitor } = deps;
   const publicOrigin = new URL(cfg.publicUrl).origin;
+  // Yerel geliştirmede panel hem 127.0.0.1 hem localhost adresinden açılabilsin
+  const devPort = new URL(cfg.publicUrl).port;
+  const allowedOrigins = cfg.devNoAuth ? [`http://127.0.0.1:${devPort}`, `http://localhost:${devPort}`].map((o) => o.replace(/:$/, "")) : [publicOrigin];
+  const isLoopback = (ip: string | null) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
   const secure = publicOrigin.startsWith("https:");
   const cookie = cookieName(secure);
 
@@ -187,9 +191,23 @@ export function createApp(deps: AppDeps): Handler {
       }
     }
     if (req.method !== "GET" && req.method !== "POST") return errorPage(405, "Desteklenmeyen istek.");
-    if (isPost && !sameOrigin(req, publicOrigin)) return errorPage(403, "Geçersiz istek kaynağı.");
+    if (isPost && !allowedOrigins.some((o) => sameOrigin(req, o))) return errorPage(403, "Geçersiz istek kaynağı.");
 
     const sess = await loadSession(db, readCookie(req.headers.get("cookie"), cookie));
+
+    // Yerel geliştirme: bu bilgisayardan gelen GET isteklerinde giriş sorulmaz (DEV_NO_AUTH=1, config.ts'te yerelle sınırlı)
+    if (cfg.devNoAuth && !isPost && isLoopback(ip) && sess?.stage !== "full") {
+      const { rows } = cfg.devUser
+        ? await db.query<{ id: string }>("SELECT id FROM users WHERE email = $1", [cfg.devUser.toLowerCase()])
+        : await db.query<{ id: string }>("SELECT u.id FROM users u JOIN memberships m ON m.user_id = u.id WHERE m.role = 'owner' ORDER BY u.created_at LIMIT 1");
+      if (rows[0]) {
+        if (sess) await destroySession(db, sess.tokenHash);
+        const orgs = await listMemberships(db, rows[0].id);
+        const token = await createSession(db, rows[0].id, orgs[0]?.orgId ?? null, "full", ip, ua);
+        const back = path === "/login" || path.startsWith("/2fa") ? "/" : path + url.search;
+        return redirect(back, setC(token));
+      }
+    }
     const msg = url.searchParams.get("m");
     const isErr = url.searchParams.get("e") === "1";
 

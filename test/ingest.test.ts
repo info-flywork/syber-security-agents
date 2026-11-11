@@ -88,6 +88,8 @@ const cfg: Config = {
   trustProxy: false,
   allowPrivate: false,
   cron: false,
+  devNoAuth: false,
+  devUser: null,
   smtp: { host: "", port: 465, secure: "tls", user: "", pass: "", from: "x@panel.test", fromName: "" },
 };
 

@@ -15,6 +15,12 @@ export interface Config {
   allowPrivate: boolean;
   /** Zamanlayıcıyı kapat (testler, CLI) */
   cron: boolean;
+  /**
+   * Sadece yerel geliştirme: bu bilgisayardan açılınca giriş sorulmaz; DEV_USER (yoksa ilk sahip) olarak oturum açılır.
+   * PUBLIC_URL http://127.0.0.1 / localhost değilse uygulama başlamaz — sunucuda açılamaz.
+   */
+  devNoAuth: boolean;
+  devUser: string | null;
   smtp: {
     host: string;
     port: number;
@@ -37,6 +43,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (appSecret.length < 32) throw new Error("APP_SECRET en az 32 karakter olmalı (openssl rand -hex 32)");
   const publicUrl = req(env, "PUBLIC_URL").replace(/\/$/, "");
   if (!/^https?:\/\/[^/]+$/.test(publicUrl)) throw new Error("PUBLIC_URL sadece şema + alan adı olmalı, ör. https://panel.ornek.com");
+  const devNoAuth = env.DEV_NO_AUTH === "1";
+  if (devNoAuth && (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(publicUrl) || env.TRUST_PROXY === "1")) {
+    throw new Error("DEV_NO_AUTH=1 sadece yerel geliştirmede kullanılabilir (PUBLIC_URL=http://127.0.0.1:<port>, TRUST_PROXY kapalı)");
+  }
   return {
     databaseUrl: req(env, "DATABASE_URL"),
     publicUrl,
@@ -45,6 +55,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     trustProxy: env.TRUST_PROXY === "1",
     allowPrivate: env.ALLOW_PRIVATE === "1",
     cron: env.CRON !== "0",
+    devNoAuth,
+    devUser: env.DEV_USER?.trim() || null,
     smtp: {
       host: env.SMTP_HOST || "smail07.doruk.net.tr",
       port: Number(env.SMTP_PORT || 465),

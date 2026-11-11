@@ -79,6 +79,7 @@ async function main(): Promise<void> {
   const mailer = smtpReady(cfg) ? createMailer(cfg) : null;
   if (!mailer) console.warn("SMTP_PASS tanımlı değil: uyarı ve davet e-postaları gönderilmeyecek");
   if (cfg.allowPrivate) console.warn("ALLOW_PRIVATE=1: iç ağ adresleri izlenebilir — sadece yerel testte kullanın");
+  if (cfg.devNoAuth) console.warn(`DEV_NO_AUTH=1: bu bilgisayardan açılınca giriş sorulmaz (${cfg.devUser ?? "ilk sahip"} olarak) — sadece yerel geliştirme`);
   const monitor: MonitorDeps = { db, fetchFn: createSafeFetch(cfg.allowPrivate), mailer, publicUrl: cfg.publicUrl };
   const deps: AppDeps = { cfg, db, monitor, mailer };
   const app = createApp(deps);
